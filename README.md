@@ -1,6 +1,6 @@
 # NOMA
 
-Tienda de ropa mínima con tres productos, carrito persistente en SQLite, pago simulado y comprobante PDF.
+Tienda de ropa minimalista con catálogo sincronizado, carrito persistente en SQLite, pago simulado y comprobante PDF.
 
 ## Componentes
 

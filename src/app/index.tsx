@@ -390,7 +390,7 @@ function StoreContent({ session }: { session: Session }) {
           </View>
           <Text style={styles.overline}>VESTIR CON INTENCIÓN</Text>
           <Text style={styles.title}>Menos, pero{'\n'}mejor.</Text>
-          <Text style={styles.intro}>Tres prendas esenciales, cómodas y hechas para cada día.</Text>
+          <Text style={styles.intro}>Prendas esenciales, cómodas y hechas para cada día.</Text>
 
           {order && (
             <Pressable onPress={() => setScreen('invoice')}>
