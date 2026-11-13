@@ -1,6 +1,14 @@
 import * as SQLite from 'expo-sqlite';
+import * as Crypto from 'expo-crypto';
+import { pbkdf2Async } from '@noble/hashes/pbkdf2';
+import { sha256 } from '@noble/hashes/sha256';
+import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils';
 
 import { PRODUCTS, type Product } from '@/data/products';
+
+const ADMIN_USERNAME = 'ADMIN';
+const INITIAL_ADMIN_PASSWORD = '123';
+const PASSWORD_HASH_ITERATIONS = 120_000;
 
 export type CartItem = {
   productId: string;
@@ -18,6 +26,7 @@ export type Order = {
 
 type CartRow = { product_id: string; quantity: number };
 type OrderRow = { id: string; created_at: string; items: string; total: number };
+type UserRow = { password_hash: string; salt: string };
 
 function formatOrder(row: OrderRow): Order {
   return {
@@ -28,9 +37,31 @@ function formatOrder(row: OrderRow): Order {
   };
 }
 
+async function hashPassword(password: string, salt: Uint8Array) {
+  const hash = await pbkdf2Async(sha256, utf8ToBytes(password), salt, {
+    c: PASSWORD_HASH_ITERATIONS,
+    dkLen: 32,
+  });
+  return bytesToHex(hash);
+}
+
+function hashesMatch(first: string, second: string) {
+  if (first.length !== second.length) return false;
+  let difference = 0;
+  for (let index = 0; index < first.length; index += 1) {
+    difference |= first.charCodeAt(index) ^ second.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
 export async function openStore() {
   const database = await SQLite.openDatabaseAsync('noma.db');
   await database.execAsync(`
+    CREATE TABLE IF NOT EXISTS users (
+      username TEXT PRIMARY KEY,
+      password_hash TEXT NOT NULL,
+      salt TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS cart (
       product_id TEXT PRIMARY KEY,
       quantity INTEGER NOT NULL
@@ -42,7 +73,35 @@ export async function openStore() {
       total INTEGER NOT NULL
     );
   `);
+  const admin = await database.getFirstAsync<{ username: string }>(
+    'SELECT username FROM users WHERE username = ?',
+    ADMIN_USERNAME,
+  );
+  if (!admin) {
+    const salt = await Crypto.getRandomBytesAsync(16);
+    await database.runAsync(
+      'INSERT OR IGNORE INTO users (username, password_hash, salt) VALUES (?, ?, ?)',
+      ADMIN_USERNAME,
+      await hashPassword(INITIAL_ADMIN_PASSWORD, salt),
+      bytesToHex(salt),
+    );
+  }
   return database;
+}
+
+export async function authenticateAdmin(
+  database: SQLite.SQLiteDatabase,
+  username: string,
+  password: string,
+) {
+  if (username.trim().toUpperCase() !== ADMIN_USERNAME || !password) return false;
+  const user = await database.getFirstAsync<UserRow>(
+    'SELECT password_hash, salt FROM users WHERE username = ?',
+    ADMIN_USERNAME,
+  );
+  if (!user) return false;
+  const passwordHash = await hashPassword(password, hexToBytes(user.salt));
+  return hashesMatch(passwordHash, user.password_hash);
 }
 
 export async function getCart(database: SQLite.SQLiteDatabase, products: Product[] = PRODUCTS) {

@@ -1,52 +1,37 @@
 import { useState } from 'react';
 import { Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { isSupabaseConfigured, supabase } from '@/services/supabase';
+import { authenticateAdmin } from '@/services/store';
+import type { openStore } from '@/services/store';
 
 const colors = {
   background: '#F6F4EF',
   surface: '#FFFFFF',
   text: '#242720',
   muted: '#77796F',
-  green: '#385A47',
 };
 
 type Props = {
-  initialMessage?: string;
+  database: Awaited<ReturnType<typeof openStore>>;
+  onLogin: () => void;
 };
 
-export default function AuthScreen({ initialMessage = '' }: Props) {
-  const [creatingAccount, setCreatingAccount] = useState(false);
-  const [email, setEmail] = useState('');
+export default function AuthScreen({ database, onLogin }: Props) {
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [message, setMessage] = useState(initialMessage);
+  const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
 
   async function submit() {
-    const client = supabase;
-    if (!client || busy) return;
+    if (busy) return;
     setBusy(true);
     setMessage('');
     try {
-      if (creatingAccount) {
-        const { data, error } = await client.auth.signUp({
-          email: email.trim(),
-          password,
-        });
-        if (error) throw error;
-        if (!data.session) {
-          setMessage('Cuenta creada. Confirma tu correo y luego inicia sesión.');
-        }
-      } else {
-        const { error } = await client.auth.signInWithPassword({
-          email: email.trim(),
-          password,
-        });
-        if (error) throw error;
-      }
+      if (await authenticateAdmin(database, username, password)) onLogin();
+      else setMessage('Usuario o contraseña incorrectos.');
     } catch (error) {
-      const details = error instanceof Error ? error.message : 'Intenta de nuevo.';
-      setMessage(details);
+      console.error('No se pudo verificar el usuario local.', error);
+      setMessage('No se pudo verificar el usuario local.');
     } finally {
       setBusy(false);
     }
@@ -56,24 +41,23 @@ export default function AuthScreen({ initialMessage = '' }: Props) {
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.content}>
         <Text style={styles.logo}>NOMA.</Text>
-        <Text style={styles.title}>{creatingAccount ? 'Crear cuenta' : 'Bienvenido'}</Text>
-        <Text style={styles.subtitle}>Inicia sesión con tu cuenta de Supabase.</Text>
+        <Text style={styles.title}>Bienvenido</Text>
+        <Text style={styles.subtitle}>Inicia sesión para continuar.</Text>
 
         <TextInput
-          accessibilityLabel="Correo electrónico"
-          autoCapitalize="none"
-          autoComplete="email"
-          keyboardType="email-address"
-          onChangeText={setEmail}
-          placeholder="Correo electrónico"
+          accessibilityLabel="Usuario"
+          autoCapitalize="characters"
+          autoComplete="username"
+          onChangeText={setUsername}
+          placeholder="Usuario"
           placeholderTextColor={colors.muted}
           style={styles.input}
-          value={email}
+          value={username}
         />
         <TextInput
           accessibilityLabel="Contraseña"
           autoCapitalize="none"
-          autoComplete={creatingAccount ? 'new-password' : 'current-password'}
+          autoComplete="current-password"
           onChangeText={setPassword}
           placeholder="Contraseña"
           placeholderTextColor={colors.muted}
@@ -83,27 +67,12 @@ export default function AuthScreen({ initialMessage = '' }: Props) {
         />
 
         {message ? <Text style={styles.message}>{message}</Text> : null}
-        {!isSupabaseConfigured ? (
-          <Text style={styles.message}>Configura la URL y la clave pública de Supabase en el archivo .env.</Text>
-        ) : null}
 
         <Pressable
-          disabled={!isSupabaseConfigured || busy || !email || !password}
+          disabled={busy || !username || !password}
           onPress={() => void submit()}
-          style={[styles.button, (!isSupabaseConfigured || busy || !email || !password) && styles.disabled]}>
-          <Text style={styles.buttonText}>
-            {busy ? 'Un momento…' : creatingAccount ? 'Crear cuenta' : 'Iniciar sesión'}
-          </Text>
-        </Pressable>
-        <Pressable
-          disabled={busy}
-          onPress={() => {
-            setCreatingAccount((current) => !current);
-            setMessage('');
-          }}>
-          <Text style={styles.switch}>
-            {creatingAccount ? 'Ya tengo una cuenta · Iniciar sesión' : 'Crear una cuenta nueva'}
-          </Text>
+          style={[styles.button, (busy || !username || !password) && styles.disabled]}>
+          <Text style={styles.buttonText}>{busy ? 'Un momento…' : 'Iniciar sesión'}</Text>
         </Pressable>
       </View>
     </SafeAreaView>
@@ -121,5 +90,4 @@ const styles = StyleSheet.create({
   button: { alignItems: 'center', backgroundColor: colors.text, borderRadius: 11, justifyContent: 'center', marginTop: 20, minHeight: 50 },
   disabled: { opacity: 0.55 },
   buttonText: { color: colors.surface, fontSize: 14, fontWeight: '700' },
-  switch: { color: colors.green, fontSize: 13, fontWeight: '600', marginTop: 20, textAlign: 'center' },
 });

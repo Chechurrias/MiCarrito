@@ -32,12 +32,11 @@ export async function getCatalog(): Promise<Product[]> {
   }));
 }
 
-export async function sendOrder(order: Order, accessToken: string) {
+export async function sendOrder(order: Order) {
   const response = await fetch(`${API_URL}/api/orders`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
     },
     body: JSON.stringify(order),
   });

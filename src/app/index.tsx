@@ -3,7 +3,6 @@ import * as Network from 'expo-network';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { StatusBar } from 'expo-status-bar';
-import type { Session } from '@supabase/supabase-js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Modal,
@@ -19,7 +18,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import AuthScreen from '@/components/auth-screen';
 import { PRODUCTS, type Product } from '@/data/products';
 import { API_URL, getCatalog, sendOrder } from '@/services/api';
-import { isSupabaseConfigured, supabase } from '@/services/supabase';
 import {
   changeQuantity,
   createOrder,
@@ -56,14 +54,13 @@ const escapeHtml = (text: string) =>
 
 async function syncStore(
   database: StoreDatabase,
-  accessToken: string,
   updateCatalog: (products: Product[]) => Promise<void>,
   updateOrder: (order: Order) => void = () => {},
 ) {
   const products = await getCatalog();
   await updateCatalog(products);
   for (const order of await getPendingOrders(database)) {
-    const savedOrder = await sendOrder(order, accessToken);
+    const savedOrder = await sendOrder(order);
     await removePendingOrder(database, order.id);
     updateOrder(savedOrder);
   }
@@ -113,58 +110,45 @@ function printInvoiceOnWeb(html: string) {
 }
 
 export default function StoreScreen() {
-  const [session, setSession] = useState<Session | null>(null);
-  const [authLoading, setAuthLoading] = useState(isSupabaseConfigured);
-  const [authMessage, setAuthMessage] = useState('');
+  const [database, setDatabase] = useState<StoreDatabase | null>(null);
+  const [databaseError, setDatabaseError] = useState('');
+  const [authenticated, setAuthenticated] = useState(false);
 
   useEffect(() => {
-    const client = supabase;
-    if (!client || !isSupabaseConfigured) return;
-
     let active = true;
-    const {
-      data: { subscription },
-    } = client.auth.onAuthStateChange((_event, nextSession) => {
-      if (!active) return;
-      setSession(nextSession);
-      setAuthMessage('');
-      setAuthLoading(false);
-    });
-
-    void client.auth
-      .getSession()
-      .then(({ data, error }) => {
-        if (!active) return;
-        if (error) setAuthMessage(error.message);
-        setSession(data.session);
-        setAuthLoading(false);
+    void openStore()
+      .then((db) => {
+        if (active) setDatabase(db);
       })
       .catch((error: unknown) => {
         if (!active) return;
-        setAuthMessage(error instanceof Error ? error.message : 'No se pudo leer la sesión.');
-        setAuthLoading(false);
+        console.error('No se pudo abrir la base local.', error);
+        setDatabaseError('No se pudo abrir la base local.');
       });
-
-    return () => {
-      active = false;
-      subscription.unsubscribe();
-    };
+    return () => { active = false; };
   }, []);
 
-  if (authLoading) {
+  if (!database) {
     return (
       <SafeAreaView style={styles.safeArea}>
-        <Text style={styles.loading}>Cargando sesión…</Text>
+        <Text style={styles.loading}>{databaseError || 'Cargando tienda…'}</Text>
       </SafeAreaView>
     );
   }
-  if (!session) return <AuthScreen initialMessage={authMessage} />;
+  if (!authenticated) {
+    return <AuthScreen database={database} onLogin={() => setAuthenticated(true)} />;
+  }
 
-  return <StoreContent session={session} />;
+  return <StoreContent database={database} onSignOut={() => setAuthenticated(false)} />;
 }
 
-function StoreContent({ session }: { session: Session }) {
-  const [database, setDatabase] = useState<StoreDatabase | null>(null);
+function StoreContent({
+  database,
+  onSignOut,
+}: {
+  database: StoreDatabase;
+  onSignOut: () => void;
+}) {
   const [products, setProducts] = useState<Product[]>(PRODUCTS);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [order, setOrder] = useState<Order | null>(null);
@@ -187,7 +171,6 @@ function StoreContent({ session }: { session: Session }) {
     try {
       await syncStore(
         db,
-        session.access_token,
         async (syncedProducts) => {
           setProducts(syncedProducts);
           setCart(await getCart(db, syncedProducts));
@@ -213,21 +196,19 @@ function StoreContent({ session }: { session: Session }) {
     } finally {
       syncing.current = false;
     }
-  }, [session.access_token]);
+  }, []);
 
   useEffect(() => {
     let active = true;
 
     async function start() {
       try {
-        const db = await openStore();
-        const savedCart = await getCart(db);
+        const savedCart = await getCart(database);
         if (!active) return;
-        setDatabase(db);
         setCart(savedCart);
 
         if (API_URL) {
-          await synchronize(db);
+          await synchronize(database);
         }
       } catch (error) {
         console.error('No se pudo abrir la tienda.', error);
@@ -239,7 +220,7 @@ function StoreContent({ session }: { session: Session }) {
     return () => {
       active = false;
     };
-  }, [synchronize]);
+  }, [database, synchronize]);
 
   useEffect(() => {
     if (!database || !API_URL) return;
@@ -355,20 +336,9 @@ function StoreContent({ session }: { session: Session }) {
     }
   }
 
-  async function signOut() {
-    const client = supabase;
-    if (!client || busy) return;
-    setBusy(true);
+  function signOut() {
     setMessage('');
-    try {
-      const { error } = await client.auth.signOut();
-      if (error) throw error;
-    } catch (error) {
-      const details = error instanceof Error ? error.message : 'No se pudo cerrar sesión.';
-      setMessage(details);
-    } finally {
-      setBusy(false);
-    }
+    onSignOut();
   }
 
   return (
@@ -379,7 +349,7 @@ function StoreContent({ session }: { session: Session }) {
           <View style={styles.header}>
             <Text style={styles.logo}>NOMA.</Text>
             <View style={styles.account}>
-              <Text style={styles.status}>{session.user.email}</Text>
+              <Text style={styles.status}>ADMIN</Text>
               <Pressable onPress={() => void retrySync()} disabled={!API_URL || busy}>
                 <Text style={styles.status}>{status}</Text>
               </Pressable>
