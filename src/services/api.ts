@@ -3,7 +3,24 @@ import type { CartItem, Order } from '@/services/store';
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL ?? '').replace(/\/+$/, '');
 
+export type AdminCredentials = {
+  username: string;
+  password: string;
+};
+
+export type ProductInput = {
+  name: string;
+  price: number;
+  imageUrl: string;
+  stock: number;
+};
+
 async function responseError(response: Response, fallback: string) {
+  if (response.status === 404) {
+    return new Error(
+      `${fallback} (HTTP 404). La API configurada no tiene esta ruta; verifica EXPO_PUBLIC_API_URL y despliega la versión actual del servidor.`,
+    );
+  }
   try {
     const body = (await response.json()) as { error?: unknown };
     if (typeof body.error === 'string') {
@@ -58,6 +75,71 @@ export async function getCatalog(): Promise<Product[]> {
     imageUrl: image_url,
     stock,
   }));
+}
+
+function adminHeaders(credentials: AdminCredentials) {
+  return {
+    'Content-Type': 'application/json',
+    'x-admin-username': credentials.username,
+    'x-admin-password': credentials.password,
+  };
+}
+
+function formatProduct(product: {
+  id: string;
+  name: string;
+  price: number;
+  image_url: string;
+  stock: number;
+}): Product {
+  return {
+    id: product.id,
+    name: product.name,
+    price: product.price,
+    imageUrl: product.image_url,
+    stock: product.stock,
+  };
+}
+
+async function saveProductRequest(
+  path: string,
+  method: 'POST' | 'PUT',
+  input: ProductInput,
+  credentials: AdminCredentials,
+): Promise<Product> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method,
+    headers: adminHeaders(credentials),
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await responseError(response, 'No se pudo guardar el producto');
+  const product = (await response.json()) as Parameters<typeof formatProduct>[0];
+  return formatProduct(product);
+}
+
+export function createProduct(input: ProductInput, credentials: AdminCredentials) {
+  return saveProductRequest('/api/admin/products', 'POST', input, credentials);
+}
+
+export function updateProduct(
+  productId: string,
+  input: ProductInput,
+  credentials: AdminCredentials,
+) {
+  return saveProductRequest(
+    `/api/admin/products/${encodeURIComponent(productId)}`,
+    'PUT',
+    input,
+    credentials,
+  );
+}
+
+export async function deleteProduct(productId: string, credentials: AdminCredentials) {
+  const response = await fetch(`${API_URL}/api/admin/products/${encodeURIComponent(productId)}`, {
+    method: 'DELETE',
+    headers: adminHeaders(credentials),
+  });
+  if (!response.ok) throw await responseError(response, 'No se pudo eliminar el producto');
 }
 
 export async function sendOrder(order: Order) {

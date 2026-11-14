@@ -1,9 +1,12 @@
 const path = require('node:path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
+const { randomUUID, timingSafeEqual } = require('node:crypto');
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
+
+const LEGACY_PRODUCT_ID_ALIASES = new Map([['camiseta-esencial', 'p1']]);
 
 const app = express();
 const database =
@@ -41,6 +44,135 @@ app.get('/api/products', async (_request, response) => {
   return response.json(data);
 });
 
+function requireAdmin(request, response, next) {
+  const expectedUsername = process.env.ADMIN_USERNAME || 'ADMIN';
+  const expectedPassword = process.env.ADMIN_PASSWORD;
+  if (!expectedPassword) {
+    return response.status(503).json({ error: 'Configura ADMIN_PASSWORD en server/.env.' });
+  }
+
+  const username = request.get('x-admin-username') || '';
+  const password = request.get('x-admin-password') || '';
+  const passwordBuffer = Buffer.from(password);
+  const expectedBuffer = Buffer.from(expectedPassword);
+  const passwordMatches =
+    passwordBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(passwordBuffer, expectedBuffer);
+
+  if (username.toUpperCase() !== expectedUsername.toUpperCase() || !passwordMatches) {
+    return response.status(401).json({ error: 'Credenciales ADMIN inválidas.' });
+  }
+  return next();
+}
+
+function parseProductInput(body) {
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
+
+  if (!name || name.length > 200) {
+    return { error: 'El nombre debe tener entre 1 y 200 caracteres.' };
+  }
+  if (!Number.isInteger(body.price) || body.price < 1 || body.price > 2147483647) {
+    return { error: 'El precio debe ser un entero positivo.' };
+  }
+  let parsedImageUrl;
+  try {
+    parsedImageUrl = new URL(imageUrl);
+  } catch {
+    return { error: 'La imagen debe tener una URL HTTP o HTTPS válida.' };
+  }
+  if (!['http:', 'https:'].includes(parsedImageUrl.protocol)) {
+    return { error: 'La imagen debe tener una URL HTTP o HTTPS válida.' };
+  }
+  if (!Number.isInteger(body.stock) || body.stock < 0 || body.stock > 2147483647) {
+    return { error: 'El stock debe ser un entero igual o mayor que cero.' };
+  }
+  return { product: { name, price: body.price, imageUrl, stock: body.stock } };
+}
+
+async function saveProduct(request, response, productId) {
+  if (!database) {
+    response.status(503).json({ error: 'Configura Supabase en server/.env.' });
+    return null;
+  }
+  const parsed = parseProductInput(request.body || {});
+  if (parsed.error) {
+    response.status(400).json({ error: parsed.error });
+    return null;
+  }
+
+  const { product } = parsed;
+  const { data, error } = await database.rpc('admin_save_product', {
+    p_id: productId,
+    p_name: product.name,
+    p_price: product.price,
+    p_image_url: product.imageUrl,
+    p_stock: product.stock,
+  });
+  if (error || !data) {
+    console.error('Error al guardar producto en Supabase:', error);
+    response.status(500).json({ error: error?.message ?? 'Supabase no confirmó el producto.' });
+    return null;
+  }
+  return data;
+}
+
+app.post('/api/admin/products', requireAdmin, async (request, response) => {
+  try {
+    const result = await saveProduct(request, response, randomUUID());
+    if (result) return response.status(201).json(result);
+  } catch (error) {
+    console.error('Error al crear producto en Supabase:', error);
+    return response.status(500).json({
+      error: error instanceof Error ? error.message : 'Error desconocido creando el producto.',
+    });
+  }
+});
+
+app.put('/api/admin/products/:id', requireAdmin, async (request, response) => {
+  try {
+    const result = await saveProduct(request, response, request.params.id);
+    if (result) return response.json(result);
+    return undefined;
+  } catch (error) {
+    console.error('Error al actualizar producto en Supabase:', error);
+    return response.status(500).json({
+      error: error instanceof Error ? error.message : 'Error desconocido actualizando el producto.',
+    });
+  }
+});
+
+app.delete('/api/admin/products/:id', requireAdmin, async (request, response) => {
+  if (!database) {
+    return response.status(503).json({ error: 'Configura Supabase en server/.env.' });
+  }
+  try {
+    const { data, error } = await database
+      .from('products')
+      .delete()
+      .eq('id', request.params.id)
+      .select('id')
+      .maybeSingle();
+
+    if (error) {
+      if (error.code === '23503') {
+        return response.status(409).json({
+          error: 'No se puede eliminar el producto porque tiene movimientos de inventario asociados.',
+        });
+      }
+      console.error('Error al eliminar producto en Supabase:', error);
+      return response.status(500).json({ error: error.message });
+    }
+    if (!data) return response.status(404).json({ error: 'No se encontró el producto.' });
+    return response.json({ id: data.id });
+  } catch (error) {
+    console.error('Error al eliminar producto en Supabase:', error);
+    return response.status(500).json({
+      error: error instanceof Error ? error.message : 'Error desconocido eliminando el producto.',
+    });
+  }
+});
+
 app.post('/api/orders', async (request, response) => {
   if (!database) {
     return response.status(503).json({ error: 'Configura Supabase en server/.env.' });
@@ -63,12 +195,18 @@ app.post('/api/orders', async (request, response) => {
     return response.status(400).json({ error: `La factura ${id} no contiene artículos.` });
   }
 
-  const items = rawItems.map((item) => {
+  let items = rawItems.map((item) => {
     if (Array.isArray(item) && item.length === 4) {
-      return { productId: item[0], quantity: item[3] };
+      return {
+        productId: LEGACY_PRODUCT_ID_ALIASES.get(item[0]) ?? item[0],
+        quantity: item[3],
+      };
     }
     if (item && typeof item === 'object' && !Array.isArray(item)) {
-      return { productId: item.productId, quantity: item.quantity };
+      return {
+        productId: LEGACY_PRODUCT_ID_ALIASES.get(item.productId) ?? item.productId,
+        quantity: item.quantity,
+      };
     }
     return null;
   });
@@ -87,6 +225,29 @@ app.post('/api/orders', async (request, response) => {
   }
 
   try {
+    const legacyProductIds = [...new Set(
+      items
+        .map((item) => item.productId)
+        .filter((productId) => LEGACY_PRODUCT_ID_ALIASES.has(productId)),
+    )];
+    if (legacyProductIds.length > 0) {
+      const { data: existingProducts, error: productLookupError } = await database
+        .from('products')
+        .select('id')
+        .in('id', legacyProductIds);
+      if (productLookupError) {
+        console.error('Error al resolver productos heredados en Supabase:', productLookupError);
+        return response.status(500).json({ error: productLookupError.message });
+      }
+
+      const existingProductIds = new Set(existingProducts.map((product) => product.id));
+      items = items.map((item) =>
+        existingProductIds.has(item.productId)
+          ? item
+          : { ...item, productId: LEGACY_PRODUCT_ID_ALIASES.get(item.productId) },
+      );
+    }
+
     const orderCreatedAt = new Date(createdAt).toISOString();
     const { data: savedOrder, error } = await database.rpc('create_order_with_stock', {
       p_id: id,

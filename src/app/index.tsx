@@ -16,8 +16,10 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import AuthScreen from '@/components/auth-screen';
+import AdminScreen from '@/components/admin-screen';
 import { PRODUCTS, type Product } from '@/data/products';
 import { API_URL, getCatalog, sendOrder } from '@/services/api';
+import type { AdminCredentials } from '@/services/api';
 import {
   changeQuantity,
   createOrder,
@@ -28,8 +30,10 @@ import {
   removeOne,
   removePendingOrder,
   saveInventory,
+  ADMIN_USERNAME,
   type CartItem,
   type Order,
+  type UserRole,
 } from '@/services/store';
 
 type StoreDatabase = Awaited<ReturnType<typeof openStore>>;
@@ -115,7 +119,11 @@ function printInvoiceOnWeb(html: string) {
 export default function StoreScreen() {
   const [database, setDatabase] = useState<StoreDatabase | null>(null);
   const [databaseError, setDatabaseError] = useState('');
-  const [authenticated, setAuthenticated] = useState(false);
+  const [session, setSession] = useState<{
+    role: UserRole;
+    username: string;
+    adminPassword?: string;
+  } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -138,18 +146,40 @@ export default function StoreScreen() {
       </SafeAreaView>
     );
   }
-  if (!authenticated) {
-    return <AuthScreen database={database} onLogin={() => setAuthenticated(true)} />;
+  if (!session) {
+    return (
+      <AuthScreen
+        database={database}
+        onLogin={(role, username, adminPassword) =>
+          setSession({ role, username, adminPassword })
+        }
+      />
+    );
+  }
+  if (session.role === 'ADMIN') {
+    const credentials: AdminCredentials = {
+      username: ADMIN_USERNAME,
+      password: session.adminPassword ?? '',
+    };
+    return <AdminScreen credentials={credentials} onSignOut={() => setSession(null)} />;
   }
 
-  return <StoreContent database={database} onSignOut={() => setAuthenticated(false)} />;
+  return (
+    <StoreContent
+      database={database}
+      username={session.username}
+      onSignOut={() => setSession(null)}
+    />
+  );
 }
 
 function StoreContent({
   database,
+  username,
   onSignOut,
 }: {
   database: StoreDatabase;
+  username: string;
   onSignOut: () => void;
 }) {
   const [products, setProducts] = useState<Product[]>(PRODUCTS);
@@ -384,7 +414,7 @@ function StoreContent({
           <View style={styles.header}>
             <Text style={styles.logo}>NOMA.</Text>
             <View style={styles.account}>
-              <Text style={styles.status}>ADMIN</Text>
+              <Text style={styles.status}>{username}</Text>
               <Pressable onPress={() => void retrySync()} disabled={!API_URL || busy}>
                 <Text style={styles.status}>{status}</Text>
               </Pressable>

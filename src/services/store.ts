@@ -6,9 +6,11 @@ import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils';
 
 import { PRODUCTS, type Product } from '@/data/products';
 
-const ADMIN_USERNAME = 'ADMIN';
+export const ADMIN_USERNAME = 'ADMIN';
 const INITIAL_ADMIN_PASSWORD = '123';
 const PASSWORD_HASH_ITERATIONS = 120_000;
+
+export type UserRole = 'ADMIN' | 'CUSTOMER';
 
 export type CartItem = {
   productId: string;
@@ -28,7 +30,12 @@ type CartRow = { product_id: string; quantity: number };
 type OrderRow = { id: string; created_at: string; items: string; total: number };
 type InventoryRow = { product_id: string; stock: number };
 type ForeignKeyRow = { table: string; from: string; to: string };
-type UserRow = { password_hash: string; salt: string };
+type TableColumnRow = { name: string };
+type UserRow = { password_hash: string; salt: string; role: UserRole };
+
+function normalizeUsername(username: string) {
+  return username.trim().toUpperCase();
+}
 
 function formatOrder(row: OrderRow): Order {
   return {
@@ -63,7 +70,8 @@ export async function openStore() {
     CREATE TABLE IF NOT EXISTS users (
       username TEXT PRIMARY KEY,
       password_hash TEXT NOT NULL,
-      salt TEXT NOT NULL
+      salt TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'CUSTOMER' CHECK (role IN ('ADMIN', 'CUSTOMER'))
     );
     CREATE TABLE IF NOT EXISTS cart (
       product_id TEXT PRIMARY KEY,
@@ -87,6 +95,17 @@ export async function openStore() {
       updated_at TEXT NOT NULL
     );
   `);
+  const userColumns = await database.getAllAsync<TableColumnRow>('PRAGMA table_info(users)');
+  if (!userColumns.some((column) => column.name === 'role')) {
+    await database.execAsync(
+      "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'CUSTOMER'",
+    );
+  }
+  await database.runAsync(
+    'UPDATE users SET role = ? WHERE UPPER(username) = ?',
+    'ADMIN',
+    ADMIN_USERNAME,
+  );
   for (const product of PRODUCTS) {
     await database.runAsync(
       'INSERT OR IGNORE INTO products_cache (id, name, price, image_url) VALUES (?, ?, ?, ?)',
@@ -122,28 +141,63 @@ export async function openStore() {
   if (!admin) {
     const salt = await Crypto.getRandomBytesAsync(16);
     await database.runAsync(
-      'INSERT OR IGNORE INTO users (username, password_hash, salt) VALUES (?, ?, ?)',
+      'INSERT OR IGNORE INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)',
       ADMIN_USERNAME,
       await hashPassword(INITIAL_ADMIN_PASSWORD, salt),
       bytesToHex(salt),
+      'ADMIN',
     );
   }
   return database;
 }
 
-export async function authenticateAdmin(
+export async function authenticateUser(
+  database: SQLite.SQLiteDatabase,
+  username: string,
+  password: string,
+): Promise<UserRole | null> {
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername || !password) return null;
+  const user = await database.getFirstAsync<UserRow>(
+    'SELECT password_hash, salt, role FROM users WHERE username = ?',
+    normalizedUsername,
+  );
+  if (!user) return null;
+  const passwordHash = await hashPassword(password, hexToBytes(user.salt));
+  return hashesMatch(passwordHash, user.password_hash) ? user.role : null;
+}
+
+export async function createCustomerAccount(
   database: SQLite.SQLiteDatabase,
   username: string,
   password: string,
 ) {
-  if (username.trim().toUpperCase() !== ADMIN_USERNAME || !password) return false;
-  const user = await database.getFirstAsync<UserRow>(
-    'SELECT password_hash, salt FROM users WHERE username = ?',
-    ADMIN_USERNAME,
+  const normalizedUsername = normalizeUsername(username);
+  if (!/^[A-Z0-9._-]{3,24}$/.test(normalizedUsername)) {
+    throw new Error('El usuario debe tener entre 3 y 24 caracteres (letras, números, punto, guion o guion bajo).');
+  }
+  if (normalizedUsername === ADMIN_USERNAME) {
+    throw new Error('Ese nombre está reservado.');
+  }
+  if (password.length < 6) {
+    throw new Error('La contraseña debe tener al menos 6 caracteres.');
+  }
+
+  const existingUser = await database.getFirstAsync<{ username: string }>(
+    'SELECT username FROM users WHERE username = ?',
+    normalizedUsername,
   );
-  if (!user) return false;
-  const passwordHash = await hashPassword(password, hexToBytes(user.salt));
-  return hashesMatch(passwordHash, user.password_hash);
+  if (existingUser) throw new Error('Ese usuario ya existe en este dispositivo.');
+
+  const salt = await Crypto.getRandomBytesAsync(16);
+  await database.runAsync(
+    'INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)',
+    normalizedUsername,
+    await hashPassword(password, salt),
+    bytesToHex(salt),
+    'CUSTOMER',
+  );
+  return normalizedUsername;
 }
 
 export async function getCart(database: SQLite.SQLiteDatabase, products: Product[] = PRODUCTS) {

@@ -166,18 +166,73 @@ BEGIN
   INTO saved_order;
 
   INSERT INTO public.inventory_movements (product_id, order_id, quantity_change)
-  SELECT item."productId", p_id, -SUM(item.quantity)::integer
-  FROM jsonb_to_recordset(p_items) AS item("productId" text, quantity bigint)
-  GROUP BY item."productId";
+  SELECT movement_item."productId", p_id, -SUM(movement_item.quantity)::integer
+  FROM jsonb_to_recordset(p_items) AS movement_item("productId" text, quantity bigint)
+  GROUP BY movement_item."productId";
 
   RETURN saved_order;
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.admin_save_product(
+  p_id text,
+  p_name text,
+  p_price integer,
+  p_image_url text,
+  p_stock integer
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public
+AS $$
+DECLARE
+  saved_product jsonb;
+BEGIN
+  IF p_id IS NULL OR p_id = ''
+     OR p_name IS NULL OR btrim(p_name) = ''
+     OR length(btrim(p_name)) > 200
+     OR p_price IS NULL OR p_price < 1
+     OR p_image_url IS NULL OR p_image_url = ''
+     OR p_stock IS NULL OR p_stock < 0 THEN
+    RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'INVALID_PRODUCT: datos de producto inválidos';
+  END IF;
+
+  INSERT INTO public.products (id, name, price, image_url)
+  VALUES (p_id, btrim(p_name), p_price, p_image_url)
+  ON CONFLICT (id) DO UPDATE SET
+    name = excluded.name,
+    price = excluded.price,
+    image_url = excluded.image_url;
+
+  INSERT INTO public.inventory (product_id, stock)
+  VALUES (p_id, p_stock)
+  ON CONFLICT (product_id) DO UPDATE SET
+    stock = excluded.stock,
+    updated_at = now();
+
+  SELECT jsonb_build_object(
+    'id', products.id,
+    'name', products.name,
+    'price', products.price,
+    'image_url', products.image_url,
+    'stock', inventory.stock
+  )
+  INTO saved_product
+  FROM public.products
+  JOIN public.inventory ON inventory.product_id = products.id
+  WHERE products.id = p_id;
+
+  RETURN saved_product;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.create_order_with_stock(text, timestamptz, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.create_order_with_stock(text, timestamptz, jsonb) TO service_role;
-GRANT SELECT ON public.products TO service_role;
-GRANT SELECT, UPDATE ON public.inventory TO service_role;
+REVOKE ALL ON FUNCTION public.admin_save_product(text, text, integer, text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.admin_save_product(text, text, integer, text, integer) TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.products TO service_role;
+GRANT SELECT, INSERT, UPDATE ON public.inventory TO service_role;
 GRANT SELECT ON public.products_with_inventory TO service_role;
 GRANT SELECT, INSERT ON public.orders TO service_role;
 GRANT SELECT, INSERT ON public.inventory_movements TO service_role;

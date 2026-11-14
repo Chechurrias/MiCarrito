@@ -12,3 +12,7 @@ services:
         sync: false
       - key: SUPABASE_SECRET_KEY
         sync: false
+      - key: ADMIN_USERNAME
+        value: ADMIN
+      - key: ADMIN_PASSWORD
+        sync: false
