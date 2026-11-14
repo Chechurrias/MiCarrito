@@ -48,7 +48,9 @@ function requireAdmin(request, response, next) {
   const expectedUsername = process.env.ADMIN_USERNAME || 'ADMIN';
   const expectedPassword = process.env.ADMIN_PASSWORD;
   if (!expectedPassword) {
-    return response.status(503).json({ error: 'Configura ADMIN_PASSWORD en server/.env.' });
+    return response.status(503).json({
+      error: 'ADMIN_PASSWORD no está cargada en la API. Configúrala en server/.env o en el entorno de Render y reinicia/re-despliega el servidor.',
+    });
   }
 
   const username = request.get('x-admin-username') || '';
@@ -198,13 +200,13 @@ app.post('/api/orders', async (request, response) => {
   let items = rawItems.map((item) => {
     if (Array.isArray(item) && item.length === 4) {
       return {
-        productId: LEGACY_PRODUCT_ID_ALIASES.get(item[0]) ?? item[0],
+        productId: item[0],
         quantity: item[3],
       };
     }
     if (item && typeof item === 'object' && !Array.isArray(item)) {
       return {
-        productId: LEGACY_PRODUCT_ID_ALIASES.get(item.productId) ?? item.productId,
+        productId: item.productId,
         quantity: item.quantity,
       };
     }

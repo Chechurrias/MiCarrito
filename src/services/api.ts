@@ -3,6 +3,8 @@ import type { CartItem, Order } from '@/services/store';
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL ?? '').replace(/\/+$/, '');
 
+const LEGACY_PRODUCT_ID_ALIASES = new Map([['camiseta-esencial', 'p1']]);
+
 export type AdminCredentials = {
   username: string;
   password: string;
@@ -152,7 +154,7 @@ export async function sendOrder(order: Order) {
     createdAt: order.createdAt,
     created_at: order.createdAt,
     items: order.items.map(({ productId, name, price, quantity }) => [
-      productId,
+      LEGACY_PRODUCT_ID_ALIASES.get(productId) ?? productId,
       name,
       price,
       quantity,
