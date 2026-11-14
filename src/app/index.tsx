@@ -62,15 +62,34 @@ async function syncStore(
   database: StoreDatabase,
   updateCatalog: (products: Product[]) => Promise<void>,
   updateOrder: (order: Order) => void = () => {},
+  updateUnavailableOrder: (order: Order, unavailableProductNames: string[]) => void = () => {},
 ) {
+  const products = await getCatalog();
+  await updateCatalog(products);
+  const availableProductIds = new Set(products.map((product) => product.id));
+
   for (const order of await getPendingOrders(database)) {
+    const unavailableItems = order.items.filter(
+      (item) => !availableProductIds.has(item.productId),
+    );
+    if (unavailableItems.length > 0) {
+      const missingItems = [
+        ...new Map(
+          unavailableItems.map((item) => [
+            item.productId,
+            `${item.name} (${item.productId})`,
+          ]),
+        ).values(),
+      ];
+      updateUnavailableOrder(order, missingItems);
+      continue;
+    }
+
     const savedOrder = await sendOrder(order);
     await removePendingOrder(database, order.id);
     updateOrder(savedOrder);
   }
 
-  const products = await getCatalog();
-  await updateCatalog(products);
   return products;
 }
 
@@ -222,6 +241,17 @@ function StoreContent({
           if (currentOrderId.current === syncedOrder.id) {
             setOrderConfirmed(true);
             setOrderSyncStatus('Venta confirmada; stock actualizado en Supabase.');
+          }
+        },
+        (unavailableOrder, missingItems) => {
+          const details = missingItems.join(', ');
+          setMessage(
+            `La factura ${unavailableOrder.id} sigue guardada, pero no se envió porque contiene productos que ya no están disponibles: ${details}.`,
+          );
+          if (currentOrderId.current === unavailableOrder.id) {
+            setOrderSyncStatus(
+              `No se envió porque estos productos ya no están en el catálogo: ${details}. Puedes seguir comprando productos disponibles.`,
+            );
           }
         },
       );

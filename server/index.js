@@ -6,8 +6,6 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 
-const LEGACY_PRODUCT_ID_ALIASES = new Map([['camiseta-esencial', 'p1']]);
-
 const app = express();
 const database =
   process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY
@@ -197,7 +195,7 @@ app.post('/api/orders', async (request, response) => {
     return response.status(400).json({ error: `La factura ${id} no contiene artículos.` });
   }
 
-  let items = rawItems.map((item) => {
+  const items = rawItems.map((item) => {
     if (Array.isArray(item) && item.length === 4) {
       return {
         productId: item[0],
@@ -227,29 +225,6 @@ app.post('/api/orders', async (request, response) => {
   }
 
   try {
-    const legacyProductIds = [...new Set(
-      items
-        .map((item) => item.productId)
-        .filter((productId) => LEGACY_PRODUCT_ID_ALIASES.has(productId)),
-    )];
-    if (legacyProductIds.length > 0) {
-      const { data: existingProducts, error: productLookupError } = await database
-        .from('products')
-        .select('id')
-        .in('id', legacyProductIds);
-      if (productLookupError) {
-        console.error('Error al resolver productos heredados en Supabase:', productLookupError);
-        return response.status(500).json({ error: productLookupError.message });
-      }
-
-      const existingProductIds = new Set(existingProducts.map((product) => product.id));
-      items = items.map((item) =>
-        existingProductIds.has(item.productId)
-          ? item
-          : { ...item, productId: LEGACY_PRODUCT_ID_ALIASES.get(item.productId) },
-      );
-    }
-
     const orderCreatedAt = new Date(createdAt).toISOString();
     const { data: savedOrder, error } = await database.rpc('create_order_with_stock', {
       p_id: id,

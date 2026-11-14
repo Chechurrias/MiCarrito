@@ -41,6 +41,7 @@ Tienda de ropa minimalista con catálogo y stock sincronizados, ventas pendiente
 4. Cuando hay conexión, el backend valida y descuenta el stock de forma atómica en Supabase, registra la factura y devuelve la confirmación. Solo entonces la app elimina la solicitud de la cola local y actualiza la copia local del stock.
 5. Mientras la tienda está abierta, la app consulta catálogo y órdenes pendientes cada cinco segundos. También sincroniza al recuperar conexión o al tocar el estado de sincronización.
 6. Si falla la red, Supabase no responde o no hay stock suficiente, la venta permanece pendiente en el dispositivo. La app vuelve a intentar al recuperar conexión y periódicamente mientras está abierta; el comprobante no se marca como venta confirmada hasta que Supabase valide el stock.
+7. Si una orden pendiente de una versión anterior contiene un ID que ya no existe en el catálogo, no se envía ni se reasigna a otro producto. La app conserva esa orden y muestra un aviso, pero sigue sincronizando los productos y las órdenes válidas.
 
 ## Ejecutar
 
