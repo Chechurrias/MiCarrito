@@ -62,16 +62,15 @@ async function syncStore(
   database: StoreDatabase,
   updateCatalog: (products: Product[]) => Promise<void>,
   updateOrder: (order: Order) => void = () => {},
-  updateUnavailableOrder: (order: Order, unavailableProductNames: string[]) => void = () => {},
+  updatePendingOrder: (order: Order, reason: string) => void = () => {},
 ) {
   const products = await getCatalog();
   await updateCatalog(products);
-  const availableProductIds = new Set(products.map((product) => product.id));
+  const productsById = new Map(products.map((product) => [product.id, product]));
+  let pendingOrderCount = 0;
 
   for (const order of await getPendingOrders(database)) {
-    const unavailableItems = order.items.filter(
-      (item) => !availableProductIds.has(item.productId),
-    );
+    const unavailableItems = order.items.filter((item) => !productsById.has(item.productId));
     if (unavailableItems.length > 0) {
       const missingItems = [
         ...new Map(
@@ -81,16 +80,30 @@ async function syncStore(
           ]),
         ).values(),
       ];
-      updateUnavailableOrder(order, missingItems);
+      pendingOrderCount += 1;
+      updatePendingOrder(
+        order,
+        `No se envió porque estos productos ya no están en el catálogo: ${missingItems.join(', ')}.`,
+      );
       continue;
     }
 
-    const savedOrder = await sendOrder(order);
+    let savedOrder: Order;
+    try {
+      savedOrder = await sendOrder(order);
+    } catch (error) {
+      pendingOrderCount += 1;
+      updatePendingOrder(
+        order,
+        error instanceof Error ? error.message : 'Error desconocido al validar stock.',
+      );
+      continue;
+    }
     await removePendingOrder(database, order.id);
     updateOrder(savedOrder);
   }
 
-  return products;
+  return { products, pendingOrderCount };
 }
 
 function invoiceHtml(order: Order, confirmed: boolean) {
@@ -228,7 +241,7 @@ function StoreContent({
     syncing.current = true;
     setStatus('Sincronizando…');
     try {
-      await syncStore(
+      const syncResult = await syncStore(
         db,
         async (syncedProducts) => {
           await saveInventory(db, syncedProducts);
