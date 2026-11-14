@@ -1,6 +1,6 @@
 # NOMA
 
-Tienda de ropa minimalista con catálogo sincronizado, carrito persistente en SQLite, pago simulado y comprobante PDF.
+Tienda de ropa minimalista con catálogo y stock sincronizados, ventas pendientes de validar, y comprobante PDF.
 
 ## Componentes
 
@@ -10,7 +10,7 @@ Tienda de ropa minimalista con catálogo sincronizado, carrito persistente en SQ
 │ auth-screen.tsx: acceso ADMIN local ──┐                                 │
 │                                                                        │
 │ products.json: catálogo de respaldo offline                            │
-│ services/store.ts ── SQLite: ADMIN, carrito y órdenes pendientes       │
+│ services/store.ts ── SQLite: ADMIN, carrito, stock en caché y pendientes│
 │ services/api.ts   ── HTTP ───────────────────────────┐                 │
 └──────────────────────────────────────────────────────┼─────────────────┘
                                                        ▼
@@ -20,12 +20,12 @@ Tienda de ropa minimalista con catálogo sincronizado, carrito persistente en SQ
                                          │              │
                                          └──────┬───────┘
                                                 ▼
-                                       Supabase products / orders
+                              Supabase products / orders / inventory
 ```
 
 - **`src/app/index.tsx`** presenta la tienda y coordina las acciones del usuario.
 - **`src/components/auth-screen.tsx`** permite ingresar únicamente como ADMIN local.
-- **`src/services/store.ts`** crea el ADMIN en SQLite en el primer inicio y guarda la contraseña como hash con sal. También conserva los IDs y cantidades del carrito, además de órdenes pendientes.
+- **`src/services/store.ts`** crea el ADMIN en SQLite en el primer inicio y guarda la contraseña como hash con sal. También conserva el carrito, una copia del stock recibido del servidor y ventas pendientes de validar.
 - **`shared/products.json`** permite mostrar los tres productos al iniciar sin conexión o si la API no está disponible. Se reemplaza con el catálogo de Supabase al sincronizar.
 - **`src/services/api.ts`** comunica la app con el backend; no contiene credenciales de Supabase.
 - **`server/index.js`** expone el catálogo y registra órdenes. El servidor obtiene de Supabase los precios vigentes y calcula el total antes de guardar cada orden.
@@ -35,10 +35,10 @@ Tienda de ropa minimalista con catálogo sincronizado, carrito persistente en SQ
 
 1. La app abre SQLite y muestra el catálogo de respaldo; luego intenta descargar el catálogo actual.
 2. Al agregar o quitar unidades, SQLite conserva solo el ID del producto y la cantidad. El nombre y precio visibles se resuelven desde el catálogo actual.
-3. Al pagar, se guarda una orden pendiente en SQLite y se vacía el carrito en una transacción. El pago es una simulación: no se cobra dinero.
-4. Cuando hay conexión, la app actualiza el catálogo y envía las órdenes pendientes. El backend usa los precios actuales de Supabase, guarda la orden y devuelve el comprobante actualizado; solo entonces la app elimina la orden pendiente local.
+3. Al enviar una venta, se guarda una solicitud pendiente en SQLite y se vacía el carrito en una transacción. La interfaz la muestra como pendiente; todavía no está confirmada ni se descuenta stock.
+4. Cuando hay conexión, el backend valida y descuenta el stock de forma atómica en Supabase, registra la factura y devuelve la confirmación. Solo entonces la app elimina la solicitud de la cola local y actualiza la copia local del stock.
 5. Mientras la tienda está abierta, la app consulta catálogo y órdenes pendientes cada cinco segundos. También sincroniza al recuperar conexión o al tocar el estado de sincronización.
-6. Si falla la red o el servicio, el carrito o la orden pendiente permanecen en el dispositivo. El recibo muestra el motivo del error y el siguiente intento automático.
+6. Si falla la red, Supabase no responde o no hay stock suficiente, la venta permanece pendiente en el dispositivo. La app vuelve a intentar al recuperar conexión y periódicamente mientras está abierta; el comprobante no se marca como venta confirmada hasta que Supabase valide el stock.
 
 ## Ejecutar
 
@@ -47,11 +47,17 @@ npm install
 npx expo start
 ```
 
-Para generar la factura, pulsa **Pagar · simulado** y luego **Descargar factura PDF**. En Android y web se abre la vista de impresión; selecciona **Guardar como PDF**. En iOS se abre el menú para compartir el PDF.
+Para enviar una venta, pulsa **Enviar venta a validar**. La app solo la marca como confirmada cuando Supabase valida y descuenta el stock. Luego puedes pulsar **Descargar factura PDF**. En Android y web se abre la vista de impresión; selecciona **Guardar como PDF**. En iOS se abre el menú para compartir el PDF.
 
 ## Supabase y servicio Node.js
 
 Las tablas `products` y `orders` deben seguir el esquema proporcionado. `server/schema.sql` es solo un ejemplo para crear y cargar datos; no lo ejecutes sobre un catálogo ya configurado, pues también actualiza las filas de ejemplo.
+
+### Inventario
+
+Después de confirmar que existen `products` y `orders`, ejecuta `server/inventory.sql` en el SQL Editor de Supabase. Crea `inventory`, cuya clave `product_id` es a la vez clave primaria y clave foránea a `products.id`, además del historial de movimientos y la función transaccional de venta. Si ya existía `products.stock` de una versión anterior, la migración copia sus valores a `inventory` antes de quitar esa columna. Los productos sin inventario comienzan en cero; actualiza `inventory.stock` con las cantidades físicas reales antes de habilitar ventas. No uses cantidades de ejemplo como inventario real.
+
+La app muestra el stock de la última sincronización como referencia. La decisión final siempre ocurre en Supabase: si dos clientes intentan comprar las mismas últimas unidades, la transacción solo confirma las unidades disponibles. Sin conexión, la solicitud queda pendiente de validar y no se considera una venta cerrada.
 
 ### Acceso local
 
@@ -61,7 +67,7 @@ El login local controla el acceso a la interfaz, no autentica solicitudes al bac
 
 ### Ejecutar localmente
 
-1. Copia `server/.env.example` a `server/.env` y configura `SUPABASE_URL` y `SUPABASE_SECRET_KEY`. La clave secreta solo debe existir en el servidor.
+1. Crea `server/.env` con `PORT=3000`, `SUPABASE_URL` y `SUPABASE_SECRET_KEY`. La clave secreta solo debe existir en el servidor.
 2. Ejecuta `npm install --prefix server` una vez. Mantén `npm run api` activo en una terminal y `npx expo start` en otra.
 3. Copia `.env.example` a `.env` y configura `EXPO_PUBLIC_API_URL`. Para un teléfono en la misma Wi-Fi, usa la IP local del equipo donde corre el servidor, no `localhost`.
 

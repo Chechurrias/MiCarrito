@@ -26,6 +26,8 @@ export type Order = {
 
 type CartRow = { product_id: string; quantity: number };
 type OrderRow = { id: string; created_at: string; items: string; total: number };
+type InventoryRow = { product_id: string; stock: number };
+type ForeignKeyRow = { table: string; from: string; to: string };
 type UserRow = { password_hash: string; salt: string };
 
 function formatOrder(row: OrderRow): Order {
@@ -56,6 +58,7 @@ function hashesMatch(first: string, second: string) {
 
 export async function openStore() {
   const database = await SQLite.openDatabaseAsync('noma.db');
+  await database.execAsync('PRAGMA foreign_keys = ON');
   await database.execAsync(`
     CREATE TABLE IF NOT EXISTS users (
       username TEXT PRIMARY KEY,
@@ -72,7 +75,46 @@ export async function openStore() {
       items TEXT NOT NULL,
       total INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS products_cache (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      price INTEGER,
+      image_url TEXT
+    );
+    CREATE TABLE IF NOT EXISTS inventory (
+      product_id TEXT PRIMARY KEY REFERENCES products_cache(id) ON DELETE CASCADE,
+      stock INTEGER NOT NULL CHECK (stock >= 0),
+      updated_at TEXT NOT NULL
+    );
   `);
+  for (const product of PRODUCTS) {
+    await database.runAsync(
+      'INSERT OR IGNORE INTO products_cache (id, name, price, image_url) VALUES (?, ?, ?, ?)',
+      product.id,
+      product.name,
+      product.price,
+      product.imageUrl,
+    );
+  }
+  const inventoryForeignKeys =
+    await database.getAllAsync<ForeignKeyRow>('PRAGMA foreign_key_list(inventory)');
+  if (!inventoryForeignKeys.some((foreignKey) => foreignKey.table === 'products_cache')) {
+    await database.withTransactionAsync(async () => {
+      await database.execAsync(`
+        INSERT OR IGNORE INTO products_cache (id)
+        SELECT product_id FROM inventory;
+        CREATE TABLE inventory_with_product_fk (
+          product_id TEXT PRIMARY KEY REFERENCES products_cache(id) ON DELETE CASCADE,
+          stock INTEGER NOT NULL CHECK (stock >= 0),
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO inventory_with_product_fk (product_id, stock, updated_at)
+        SELECT product_id, stock, updated_at FROM inventory;
+        DROP TABLE inventory;
+        ALTER TABLE inventory_with_product_fk RENAME TO inventory;
+      `);
+    });
+  }
   const admin = await database.getFirstAsync<{ username: string }>(
     'SELECT username FROM users WHERE username = ?',
     ADMIN_USERNAME,
@@ -111,6 +153,45 @@ export async function getCart(database: SQLite.SQLiteDatabase, products: Product
     return product
       ? [{ productId: product.id, name: product.name, price: product.price, quantity: row.quantity }]
       : [];
+  });
+}
+
+export async function getProductsWithCachedStock(
+  database: SQLite.SQLiteDatabase,
+  products: Product[] = PRODUCTS,
+) {
+  const rows = await database.getAllAsync<InventoryRow>('SELECT product_id, stock FROM inventory');
+  const inventory = new Map(rows.map((row) => [row.product_id, row.stock]));
+  return products.map((product) => ({
+    ...product,
+    stock: inventory.get(product.id) ?? product.stock,
+  }));
+}
+
+export async function saveInventory(database: SQLite.SQLiteDatabase, products: Product[]) {
+  const updatedAt = new Date().toISOString();
+  await database.withTransactionAsync(async () => {
+    for (const product of products) {
+      if (product.stock === null) continue;
+      await database.runAsync(
+        `INSERT INTO products_cache (id, name, price, image_url) VALUES (?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           price = excluded.price,
+           image_url = excluded.image_url`,
+        product.id,
+        product.name,
+        product.price,
+        product.imageUrl,
+      );
+      await database.runAsync(
+        `INSERT INTO inventory (product_id, stock, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(product_id) DO UPDATE SET stock = excluded.stock, updated_at = excluded.updated_at`,
+        product.id,
+        product.stock,
+        updatedAt,
+      );
+    }
   });
 }
 

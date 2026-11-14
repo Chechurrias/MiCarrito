@@ -5,6 +5,7 @@ export type Product = {
   name: string;
   price: number;
   imageUrl: string;
+  stock: number | null;
 };
 
 export const PRODUCTS: Product[] = catalog;

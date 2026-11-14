@@ -23,9 +23,11 @@ import {
   createOrder,
   getCart,
   getPendingOrders,
+  getProductsWithCachedStock,
   openStore,
   removeOne,
   removePendingOrder,
+  saveInventory,
   type CartItem,
   type Order,
 } from '@/services/store';
@@ -57,17 +59,18 @@ async function syncStore(
   updateCatalog: (products: Product[]) => Promise<void>,
   updateOrder: (order: Order) => void = () => {},
 ) {
-  const products = await getCatalog();
-  await updateCatalog(products);
   for (const order of await getPendingOrders(database)) {
     const savedOrder = await sendOrder(order);
     await removePendingOrder(database, order.id);
     updateOrder(savedOrder);
   }
+
+  const products = await getCatalog();
+  await updateCatalog(products);
   return products;
 }
 
-function invoiceHtml(order: Order) {
+function invoiceHtml(order: Order, confirmed: boolean) {
   const items = order.items
     .map((item) => `<p>${escapeHtml(item.name)} · ${item.quantity} × ${money(item.price)}</p>`)
     .join('');
@@ -79,7 +82,7 @@ function invoiceHtml(order: Order) {
       <p>${new Date(order.createdAt).toLocaleString('es-CO')}</p>
       ${items}
       <h2>Total · ${money(order.total)}</h2>
-      <p>Pago simulado exitoso. Gracias por tu compra.</p>
+      <p>${confirmed ? 'Venta confirmada; stock validado.' : 'Venta pendiente de validar stock; aún no está confirmada.'}</p>
     </main>`;
 }
 
@@ -156,6 +159,7 @@ function StoreContent({
   const [status, setStatus] = useState(API_URL ? 'Sincronizando…' : 'Servicio API no configurado');
   const [message, setMessage] = useState('');
   const [orderSyncStatus, setOrderSyncStatus] = useState('');
+  const [orderConfirmed, setOrderConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const syncing = useRef(false);
   const currentOrderId = useRef<string | null>(null);
@@ -163,6 +167,12 @@ function StoreContent({
 
   const count = cart.reduce((total, item) => total + item.quantity, 0);
   const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const quantityInCart = (productId: string) =>
+    cart.find((item) => item.productId === productId)?.quantity ?? 0;
+  const canAddProduct = (productId: string) => {
+    const product = products.find((item) => item.id === productId);
+    return !!product && (product.stock === null || quantityInCart(productId) < product.stock);
+  };
 
   const synchronize = useCallback(async (db: StoreDatabase) => {
     if (!API_URL || syncing.current) return false;
@@ -172,6 +182,7 @@ function StoreContent({
       await syncStore(
         db,
         async (syncedProducts) => {
+          await saveInventory(db, syncedProducts);
           setProducts(syncedProducts);
           setCart(await getCart(db, syncedProducts));
         },
@@ -179,7 +190,8 @@ function StoreContent({
           savedOrderIds.current.add(syncedOrder.id);
           setOrder((current) => (current?.id === syncedOrder.id ? syncedOrder : current));
           if (currentOrderId.current === syncedOrder.id) {
-            setOrderSyncStatus('Orden guardada en Supabase.');
+            setOrderConfirmed(true);
+            setOrderSyncStatus('Venta confirmada; stock actualizado en Supabase.');
           }
         },
       );
@@ -188,24 +200,35 @@ function StoreContent({
     } catch (error) {
       const details = error instanceof Error ? error.message : 'Error desconocido.';
       console.warn('La sincronización quedó pendiente.', error);
-      setStatus('Sin conexión · reintento en 5 s');
+      setStatus('Sincronización pendiente · reintento en 5 s');
       if (currentOrderId.current && !savedOrderIds.current.has(currentOrderId.current)) {
-        setOrderSyncStatus(`Pendiente de sincronizar: ${details}`);
+        setOrderSyncStatus(`Venta pendiente de validar stock: ${details}`);
       }
       return false;
     } finally {
       syncing.current = false;
     }
-  }, []);
+  }, [setOrderConfirmed]);
 
   useEffect(() => {
     let active = true;
 
     async function start() {
       try {
-        const savedCart = await getCart(database);
+        const cachedProducts = await getProductsWithCachedStock(database);
+        if (!active) return;
+        setProducts(cachedProducts);
+        const savedCart = await getCart(database, cachedProducts);
         if (!active) return;
         setCart(savedCart);
+        const pendingOrders = await getPendingOrders(database);
+        if (pendingOrders.length > 0) {
+          const latestPendingOrder = pendingOrders[pendingOrders.length - 1];
+          currentOrderId.current = latestPendingOrder.id;
+          setOrder(latestPendingOrder);
+          setOrderConfirmed(false);
+          setOrderSyncStatus('Venta pendiente de validar stock; se confirmará al conectar con el servicio.');
+        }
 
         if (API_URL) {
           await synchronize(database);
@@ -245,6 +268,14 @@ function StoreContent({
 
   async function updateProduct(product: Product, quantity: number) {
     if (!database || busy) return;
+    if (
+      quantity > 0 &&
+      product.stock !== null &&
+      quantityInCart(product.id) >= product.stock
+    ) {
+      setMessage('No hay más unidades disponibles según la última consulta. Sincroniza para validar el stock.');
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
@@ -273,6 +304,7 @@ function StoreContent({
           const network = await Network.getNetworkStateAsync();
           if (network.isConnected && network.isInternetReachable !== false) {
             const latestProducts = await getCatalog();
+            await saveInventory(database, latestProducts);
             setProducts(latestProducts);
             checkoutCart = await getCart(database, latestProducts);
             setCart(checkoutCart);
@@ -284,13 +316,16 @@ function StoreContent({
 
       const newOrder = await createOrder(database, checkoutCart);
       currentOrderId.current = newOrder.id;
+      setOrderConfirmed(false);
       setCart([]);
       setOrder(newOrder);
-      setOrderSyncStatus(API_URL ? 'Sincronizando con Supabase…' : 'Pendiente: servicio API no configurado.');
+      setOrderSyncStatus(
+        'Venta pendiente de validar stock; no se confirmará hasta que el servidor verifique las unidades.',
+      );
       setScreen('invoice');
       if (API_URL) {
         const synced = await synchronize(database);
-        if (!synced) {
+        if (!synced && !savedOrderIds.current.has(newOrder.id)) {
           setMessage('La compra quedó guardada en este dispositivo y se reintentará automáticamente.');
         }
       }
@@ -307,7 +342,7 @@ function StoreContent({
     setBusy(true);
     setMessage('');
     try {
-      const html = invoiceHtml(order);
+      const html = invoiceHtml(order, orderConfirmed);
       if (Platform.OS === 'web') {
         printInvoiceOnWeb(html);
       } else if (Platform.OS === 'android') {
@@ -381,13 +416,23 @@ function StoreContent({
                 />
                 <View style={styles.productDetails}>
                   <Text style={styles.productName}>{product.name}</Text>
+                  <Text style={styles.description}>
+                    {product.stock === null
+                      ? 'Stock por validar en línea'
+                      : `${product.stock} unidades según última sincronización`}
+                  </Text>
                   <View style={styles.productFooter}>
                     <Text style={styles.price}>{money(product.price)}</Text>
                     <Pressable
                       onPress={() => void updateProduct(product, 1)}
-                      disabled={!database || busy}
-                      style={styles.addButton}>
-                      <Text style={styles.addText}>Agregar +</Text>
+                      disabled={!database || busy || !canAddProduct(product.id)}
+                      style={[
+                        styles.addButton,
+                        (!canAddProduct(product.id) || busy) && styles.disabled,
+                      ]}>
+                      <Text style={styles.addText}>
+                        {product.stock === 0 ? 'Sin stock' : 'Agregar +'}
+                      </Text>
                     </Pressable>
                   </View>
                 </View>
@@ -445,7 +490,7 @@ function StoreContent({
                       <Pressable onPress={() => {
                         const product = products.find((p) => p.id === item.productId);
                         if (product) void updateProduct(product, 1);
-                      }}>
+                      }} disabled={busy || !canAddProduct(item.productId)}>
                         <Text style={styles.step}>+</Text>
                       </Pressable>
                       <Text style={styles.price}>{money(item.price * item.quantity)}</Text>
@@ -461,13 +506,15 @@ function StoreContent({
                 disabled={!cart.length || busy}
                 onPress={() => void checkout()}
                 style={styles.payButton}>
-                <Text style={styles.payText}>{busy ? 'Un momento…' : 'Pagar · simulado'}</Text>
+                <Text style={styles.payText}>{busy ? 'Un momento…' : 'Enviar venta a validar'}</Text>
               </Pressable>
-              <Text style={styles.smallNote}>Pago de demostración · no se realiza ningún cobro.</Text>
+              <Text style={styles.smallNote}>La venta solo se confirma cuando el servidor valida y descuenta el stock.</Text>
             </>
           ) : order ? (
             <>
-              <Text style={styles.success}>Pago simulado exitoso ✓</Text>
+              <Text style={styles.success}>
+                {orderConfirmed ? 'Venta confirmada ✓' : 'Venta pendiente de validar stock'}
+              </Text>
               {orderSyncStatus ? <Text style={styles.description}>{orderSyncStatus}</Text> : null}
               <Text style={styles.description}>
                 Factura {order.id} · {new Date(order.createdAt).toLocaleDateString('es-CO')}
@@ -520,6 +567,7 @@ const styles = StyleSheet.create({
   productFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 14 },
   price: { color: colors.text, fontSize: 12, fontWeight: '600' },
   addButton: { backgroundColor: '#E7EDE7', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 },
+  disabled: { opacity: 0.55 },
   addText: { color: colors.green, fontSize: 10, fontWeight: '700' },
   note: { color: colors.muted, fontSize: 11, textAlign: 'center', marginTop: 12 },
   message: { color: '#A43E32', fontSize: 12, marginTop: 12 },

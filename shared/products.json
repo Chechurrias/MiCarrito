@@ -3,18 +3,21 @@
     "id": "p1",
     "name": "Camiseta básica",
     "price": 45000,
-    "imageUrl": "https://picsum.dev/i/852/1024/1024"
+    "imageUrl": "https://picsum.dev/i/852/1024/1024",
+    "stock": null
   },
   {
     "id": "p2",
     "name": "Jean slim",
     "price": 120000,
-    "imageUrl": "https://picsum.photos/seed/jean/400"
+    "imageUrl": "https://picsum.photos/seed/jean/400",
+    "stock": null
   },
   {
     "id": "p3",
     "name": "Chaqueta ligera",
     "price": 180000,
-    "imageUrl": "https://picsum.photos/seed/chaqueta/400"
+    "imageUrl": "https://picsum.photos/seed/chaqueta/400",
+    "stock": null
   }
 ]
